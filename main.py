@@ -78,7 +78,16 @@ def main():
         d_min=d_min,
     )
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    cwde_mask = None
+    if cfg.CWDE_SIGNALS_PATH:
+        cwde_mask = sar.load_binary_signal(cfg.CWDE_SIGNALS_PATH, result.t, signal_column=cfg.CWDE_SIGNAL_COLUMN)
+
+    print(f"Inferred period P = {result.P} timesteps")
+    print(f"Dynamic threshold Theta~ = {result.theta:.4f}")
+    print(f"Raw runs (R): {len(result.raw_runs)}, merged runs (R'): {len(result.merged_runs)}, "
+          f"final runs (R''): {len(result.final_runs)}")
+    if len(result.final_runs_df):
+        print(result.final_runs_df.to_string(index=False))
 
     dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_tag = build_run_tag(
@@ -94,45 +103,62 @@ def main():
     def outpath(what, ext):
         return make_output_path(args.output_dir, dt_str, what, run_tag, ext)
 
-    # Point-level data: everything needed to redraw subplots 1-3.
-    points_path = outpath("point_scores", "csv")
-    pd.DataFrame(
-        {
-            "timestamp": result.t,
-            "value": result.x,
-            "distance": result.d,
-            "smoothed_deviation": result.s,
-            "pattern_deviation_label": result.y,
-            "threshold": result.theta,
-        }
-    ).to_csv(points_path, index=False)
+    # SHOW_PLOT means figures are only displayed interactively; nothing is
+    # written to --output-dir in that case, CSVs included.
+    if not cfg.SHOW_PLOT:
+        os.makedirs(args.output_dir, exist_ok=True)
 
-    # Run-level data at each stage: everything needed to redraw subplot 4.
-    raw_runs_path = outpath("runs_raw", "csv")
-    result.raw_runs_df.to_csv(raw_runs_path, index=False)
+        # Point-level data: everything needed to redraw subplots 1-3.
+        points_path = outpath("point_scores", "csv")
+        points_df = pd.DataFrame(
+            {
+                "timestamp": result.t,
+                "value": result.x,
+                "distance": result.d,
+                "smoothed_deviation": result.s,
+                "pattern_deviation_label": result.y,
+                "threshold": result.theta,
+            }
+        )
+        if cwde_mask is not None:
+            points_df["cwde_anomaly_signal"] = cwde_mask.astype(int)
+        points_df.to_csv(points_path, index=False)
 
-    merged_runs_path = outpath("runs_merged", "csv")
-    result.merged_runs_df.to_csv(merged_runs_path, index=False)
+        # Run-level data at each stage: everything needed to redraw subplot 4.
+        raw_runs_path = outpath("runs_raw", "csv")
+        result.raw_runs_df.to_csv(raw_runs_path, index=False)
 
-    final_runs_path = outpath("runs_final", "csv")
-    result.final_runs_df.to_csv(final_runs_path, index=False)
+        merged_runs_path = outpath("runs_merged", "csv")
+        result.merged_runs_df.to_csv(merged_runs_path, index=False)
 
-    print(f"Inferred period P = {result.P} timesteps")
-    print(f"Dynamic threshold Theta~ = {result.theta:.4f}")
-    print(f"Raw runs (R): {len(result.raw_runs)}, merged runs (R'): {len(result.merged_runs)}, "
-          f"final runs (R''): {len(result.final_runs)}")
-    if len(result.final_runs_df):
-        print(result.final_runs_df.to_string(index=False))
+        final_runs_path = outpath("runs_final", "csv")
+        result.final_runs_df.to_csv(final_runs_path, index=False)
 
-    print(f"\nWrote point-level scores to {points_path}")
-    print(f"Wrote raw runs to {raw_runs_path}")
-    print(f"Wrote merged runs to {merged_runs_path}")
-    print(f"Wrote final runs to {final_runs_path}")
+        print(f"\nWrote point-level scores to {points_path}")
+        print(f"Wrote raw runs to {raw_runs_path}")
+        print(f"Wrote merged runs to {merged_runs_path}")
+        print(f"Wrote final runs to {final_runs_path}")
+    else:
+        print("\nSHOW_PLOT is True: nothing is written to disk, results are only displayed.")
 
     if args.plot:
-        plot_path = outpath("sar_plot", "pdf")
-        plotter.plot_sar_result(result, plot_path)
-        print(f"Wrote plot to {plot_path}")
+        plot_path = None if cfg.SHOW_PLOT else outpath("sar_plot", "pdf")
+        plotter.plot_sar_result(result, plot_path, cwde_mask=cwde_mask)
+        if cfg.SHOW_PLOT:
+            print("Displayed plot in a matplotlib window.")
+        else:
+            print(f"Wrote plot to {plot_path}")
+
+        if cfg.PLOT_PATTERN:
+            pattern_plot_path = None if cfg.SHOW_PLOT else outpath("pattern_plot", "pdf")
+            plotter.plot_pattern_sections(result, pattern_plot_path)
+            if cfg.SHOW_PLOT:
+                print("Displayed pattern plot in a matplotlib window.")
+            else:
+                print(f"Wrote pattern plot to {pattern_plot_path}")
+
+        if cfg.SHOW_PLOT:
+            plotter.show_all()
 
 
 if __name__ == "__main__":

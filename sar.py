@@ -26,7 +26,9 @@ class SARResult:
     t: np.ndarray            # timestamps (datetime64[ns]), length L
     x: np.ndarray            # values, length L
     P: int                   # period length in timesteps
+    sampling_interval_seconds: float  # inferred spacing between timesteps, in seconds
     phi: np.ndarray          # periodic pattern (daily template), length P
+    sections: list = field(repr=False)  # x split into consecutive length-P chunks (last may be shorter)
     d: np.ndarray            # raw distance to pattern, length L
     s: np.ndarray            # smoothed deviation score, length L
     theta: float             # dynamic threshold Theta~
@@ -71,6 +73,18 @@ def load_time_series(csv_path, time_column=None, value_column=None):
     return t, x
 
 
+def load_binary_signal(csv_path, t, time_column=None, signal_column="signal"):
+    """Load a 0/1 signal column from a CSV, aligned to timestamps t by exact
+    timestamp match. Any timestamp in t missing from the CSV is treated as 0.
+    """
+    time_column = time_column or cfg.TIME_COLUMN
+    df = pd.read_csv(csv_path)
+    df[time_column] = pd.to_datetime(df[time_column])
+    series = df.set_index(time_column)[signal_column]
+    aligned = series.reindex(pd.DatetimeIndex(t)).fillna(0)
+    return aligned.to_numpy(dtype=bool)
+
+
 def infer_sampling_interval_seconds(t):
     """Infer the (dominant) sampling interval of a timestamp array, in seconds."""
     if len(t) < 2:
@@ -88,6 +102,12 @@ def compute_period_timesteps(period_seconds, sampling_interval_seconds):
             f"Computed period P={P} timesteps is too short; check T/sampling interval."
         )
     return int(P)
+
+
+def compute_sections(x, P):
+    """Split x into consecutive length-P sections (the trailing section may be shorter)."""
+    L = len(x)
+    return [x[start : start + P] for start in range(0, L, P)]
 
 
 def compute_periodic_pattern(x, P):
@@ -231,6 +251,7 @@ def run_sar(
     sampling_interval = infer_sampling_interval_seconds(t)
     P = compute_period_timesteps(period_seconds, sampling_interval)
 
+    sections = compute_sections(x, P)
     phi = compute_periodic_pattern(x, P)
     d = compute_deviation(x, phi, P)
     s = smooth_deviation(d, W)
@@ -249,7 +270,9 @@ def run_sar(
         t=t,
         x=x,
         P=P,
+        sampling_interval_seconds=sampling_interval,
         phi=phi,
+        sections=sections,
         d=d,
         s=s,
         theta=theta,

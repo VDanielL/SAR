@@ -14,10 +14,10 @@ The surviving runs are the final sustained anomaly region candidates.
 ## Files
 
 - `sar.py` — the SAR algorithm (pattern estimation, deviation, thresholding, run merging/pruning).
-- `main_config.py` — manual parameters (`PERIOD_SECONDS`, `SMOOTHING_WINDOW`, `LAMBDA`, `G_MAX`, `D_MIN`) and input CSV column names.
+- `main_config.py` — manual parameters (`PERIOD_SECONDS`, `SMOOTHING_WINDOW`, `LAMBDA`, `G_MAX`, `D_MIN`), input CSV column names, plot toggles (`SHOW_PLOT`, `PLOT_PATTERN`, `TARGET`), and an optional C-WDE overlay (`CWDE_SIGNALS_PATH`, `CWDE_SIGNAL_COLUMN`).
 - `main.py` — CLI entry point: loads a CSV, runs SAR, saves results.
-- `plotter.py` — builds a 4-panel summary figure (original data with flagged points, distance, smoothed score with threshold, run stages).
-- `data/` — example input data (CESNET-TimeSeries24, IP 1367, hourly `n_packets`).
+- `plotter.py` — builds the summary figure and a separate pattern figure (every period-length section of the data overlaid with the pattern phi). The summary figure's layout depends on `TARGET`: `'view'` gives a 4-panel diagnostic figure (original data with flagged points, distance, smoothed score with threshold, run stages); `'paper'` gives a compact 2-axis figure (original data with flagged points, plus a thin strip showing only the final anomaly regions), sized for an IEEE double-column layout and rendered with LaTeX text. `TARGET = 'paper'` also resizes the pattern figure to the same double-column width; its content is unchanged.
+- `data/` — example input data (CESNET-TimeSeries24, IP 1367, hourly `n_packets`), plus a `C-WDE/` folder holding externally computed detector-ensemble signals for the same series (row-aligned; overlaid on the summary plot when `CWDE_SIGNALS_PATH` is set), and labelled reference datasets (`NAB/`, `IOPS/`, `Yahoo/`, `NEK/`, `CESNET/`) with manifests under `dataset_manifest/`.
 - `results/` — output of a run (created by `main.py`).
 
 ## Usage
@@ -36,4 +36,5 @@ Each run writes to `--output-dir` with filenames of the form
 
 - `..._point_scores_....csv` — per-timestep value, distance, smoothed deviation, threshold, and pattern-deviation label.
 - `..._runs_raw_....csv`, `..._runs_merged_....csv`, `..._runs_final_....csv` — the sustained-anomaly-region candidates at each stage of the merge-then-prune procedure.
-- `..._sar_plot_....pdf` — the 4-panel summary figure (only with `--plot`).
+- `..._sar_plot_....pdf` — the 4-panel summary figure (only with `--plot`, and only if `SHOW_PLOT = False` in `main_config.py`; if `SHOW_PLOT = True` the figure is displayed in a matplotlib window instead of being saved).
+- `..._pattern_plot_....pdf` — the pattern figure (only with `--plot` and `PLOT_PATTERN = True`; also governed by `SHOW_PLOT`).
