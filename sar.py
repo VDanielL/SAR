@@ -64,7 +64,12 @@ def load_time_series(csv_path, time_column=None, value_column=None):
             f"found {list(df.columns)}"
         )
 
-    df[time_column] = pd.to_datetime(df[time_column])
+    if pd.api.types.is_numeric_dtype(df[time_column]):
+        # A numeric timestamp column is a Unix epoch in seconds (e.g. NEK);
+        # pd.to_datetime would otherwise silently treat it as nanoseconds.
+        df[time_column] = pd.to_datetime(df[time_column], unit="s")
+    else:
+        df[time_column] = pd.to_datetime(df[time_column])
     df = df.sort_values(time_column).reset_index(drop=True)
     df = df.dropna(subset=[value_column])
 
@@ -79,7 +84,12 @@ def load_binary_signal(csv_path, t, time_column=None, signal_column="signal"):
     """
     time_column = time_column or cfg.TIME_COLUMN
     df = pd.read_csv(csv_path)
-    df[time_column] = pd.to_datetime(df[time_column])
+    if pd.api.types.is_numeric_dtype(df[time_column]):
+        # A numeric timestamp column is a Unix epoch in seconds (e.g. NEK);
+        # pd.to_datetime would otherwise silently treat it as nanoseconds.
+        df[time_column] = pd.to_datetime(df[time_column], unit="s")
+    else:
+        df[time_column] = pd.to_datetime(df[time_column])
     series = df.set_index(time_column)[signal_column]
     aligned = series.reindex(pd.DatetimeIndex(t)).fillna(0)
     return aligned.to_numpy(dtype=bool)
