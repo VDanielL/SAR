@@ -1,0 +1,28 @@
+{
+    "main": {
+        "smoothing_window": 2,
+        "lam": 1.4216025192960287,
+        "g_max": 22,
+        "d_min": 2
+    },
+    "pointwise": {
+        "NAB": {
+            "smoothing_window": 3,
+            "lam": 4.999617639110029,
+            "g_max": 2,
+            "d_min": 2
+        },
+        "Yahoo": {
+            "smoothing_window": 1,
+            "lam": 3.138275346906754,
+            "g_max": 1,
+            "d_min": 1
+        },
+        "IOPS": {
+            "smoothing_window": 3,
+            "lam": 4.996740377134475,
+            "g_max": 1,
+            "d_min": 3
+        }
+    }
+}

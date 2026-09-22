@@ -78,9 +78,49 @@ def load_time_series(csv_path, time_column=None, value_column=None):
     return t, x
 
 
+def generate_faux_timestamps(n, sampling_interval_seconds, start="1970-01-01"):
+    """n evenly-spaced datetime64[ns] timestamps, sampling_interval_seconds
+    apart, starting at start (its absolute value is arbitrary - only the
+    spacing matters to SAR). For series whose own "timestamp" column is
+    really just a sequential row index rather than real wall-clock time
+    (e.g. Yahoo, IOPS - see load_time_series_faux_timestamps()).
+    """
+    offsets = pd.to_timedelta(np.arange(n) * sampling_interval_seconds, unit="s")
+    return (pd.Timestamp(start) + offsets).to_numpy()
+
+
+def load_time_series_faux_timestamps(csv_path, value_column, sampling_interval_seconds):
+    """Like load_time_series(), but ignores the CSV's own timestamp column
+    and synthesizes evenly-spaced ones sampling_interval_seconds apart
+    instead, via generate_faux_timestamps() - for series (e.g. Yahoo, IOPS)
+    whose "timestamp" column is really just a sequential row index, not
+    real time, so treating it as a Unix epoch (load_time_series's usual
+    rule) would compute a nonsensical period relative to the series length.
+
+    Returns
+    -------
+    t : np.ndarray of datetime64[ns]
+    x : np.ndarray of float
+    """
+    value_column = value_column or cfg.VALUE_COLUMN
+
+    df = pd.read_csv(csv_path)
+    if value_column not in df.columns:
+        raise ValueError(f"Expected column '{value_column}' in {csv_path}, found {list(df.columns)}")
+
+    df = df.dropna(subset=[value_column]).reset_index(drop=True)
+    t = generate_faux_timestamps(len(df), sampling_interval_seconds)
+    x = df[value_column].to_numpy(dtype=float)
+    return t, x
+
+
 def load_binary_signal(csv_path, t, time_column=None, signal_column="signal"):
     """Load a 0/1 signal column from a CSV, aligned to timestamps t by exact
     timestamp match. Any timestamp in t missing from the CSV is treated as 0.
+
+    Matching is done tz-naive: t and the CSV's timestamps can be tz-aware or
+    not independently (e.g. a source CSV that dropped its UTC offset while t
+    kept it) - only the wall-clock value needs to match.
     """
     time_column = time_column or cfg.TIME_COLUMN
     df = pd.read_csv(csv_path)
@@ -91,7 +131,12 @@ def load_binary_signal(csv_path, t, time_column=None, signal_column="signal"):
     else:
         df[time_column] = pd.to_datetime(df[time_column])
     series = df.set_index(time_column)[signal_column]
-    aligned = series.reindex(pd.DatetimeIndex(t)).fillna(0)
+    if series.index.tz is not None:
+        series.index = series.index.tz_localize(None)
+    t_index = pd.DatetimeIndex(t)
+    if t_index.tz is not None:
+        t_index = t_index.tz_localize(None)
+    aligned = series.reindex(t_index).fillna(0)
     return aligned.to_numpy(dtype=bool)
 
 

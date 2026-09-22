@@ -9,21 +9,21 @@ Modes (--mode):
                   python main.py --input data/cesnet_ip1367_n_packets_hourly.csv \\
                                   --output-dir results --plot
 
-  single-wide Same as 'single', but defaults --input to main_config.WIDE_INPUT
-              (the CESNET example series) and its own WIDE_* SAR parameters,
-              and - only when TARGET == 'paper' - plots with
-              plotter.plot_sar_result_wide() instead of plot_sar_result(),
-              spanning the full IEEE double-column width rather than the
-              single-column-like width used by 'single'. With TARGET ==
-              'view' it behaves exactly like 'single'.
+  single-wide Same as 'single' (same SMOOTHING_WINDOW/LAMBDA/G_MAX/D_MIN),
+              but defaults --input to main_config.WIDE_INPUT (the CESNET
+              example series), and - only when TARGET == 'paper' - plots
+              with plotter.plot_sar_result_wide() instead of
+              plot_sar_result(), spanning the full IEEE double-column width
+              rather than the single-column-like width used by 'single'.
+              With TARGET == 'view' it behaves exactly like 'single'.
 
                   python main.py --mode single-wide --plot
 
   cesnet      Run SAR on all three CESNET_INPUTS metrics (n_packets, n_flows,
               n_bytes - the same IP 1367 traffic, three different measures),
-              using the WIDE_* SAR parameters for all three. There is no
-              ground truth for any of them, so this saves the anomalous
-              sections themselves (results/CESNET/range_candidates/, like
+              using the same SMOOTHING_WINDOW/LAMBDA/G_MAX/D_MIN as every
+              other mode. There is no ground truth for any of them, so this
+              saves the anomalous sections themselves (results/CESNET/range_candidates/, like
               --mode evaluate does for NEK) and prints/saves how many SAR
               found per metric (results/CESNET/anomaly_counts.csv); it then
               plots the n_packets series (with its C-WDE overlay) the same
@@ -38,12 +38,43 @@ Modes (--mode):
 
                   python main.py --mode evaluate
 
-  tune        Use Optuna to search SMOOTHING_WINDOW, LAMBDA, G_MAX and D_MIN
-              for the combination that maximises the mean PRTS F1 score over
-              --eval-dataset-dir. No plotting, no status bar, and nothing is
-              written to disk; the best parameters are only printed at the end.
+  evaluate-point-wise
+              Run SAR over every series in each of POINTWISE_DATASETS (NAB,
+              Yahoo, IOPS), scoring each dataset the same way 'evaluate'
+              does for NEK (into its own results/<dataset>/ folder). These
+              datasets label individual anomalous points rather than
+              sustained ranges, so on top of that this also counts how many
+              regions SAR signalled and their duration, per series and as
+              the total/mean/std per dataset.
+
+                  python main.py --mode evaluate-point-wise
+
+  tune        Use Optuna (tuning.py) to search SMOOTHING_WINDOW, LAMBDA,
+              G_MAX and D_MIN for the combination that maximises mean PRTS
+              F1 over the "long-anomaly" datasets (every DATASETS entry not
+              in POINTWISE_DATASETS - currently just NEK). No plotting, no
+              status bar, and nothing is written to disk; the best
+              parameters are only printed at the end.
 
                   python main.py --mode tune
+
+  tune-point-wise
+              Same search, but the reward is mean F1 over POINTWISE_DATASETS
+              (NAB/Yahoo/IOPS) instead - F1 structurally collapses there
+              regardless of detection quality (see the project chat's
+              investigation), so this is for seeing/quantifying that
+              directly rather than a meaningful tuning target on its own.
+
+                  python main.py --mode tune-point-wise
+
+  tune-combined
+              Same search, but the reward combines both: mean F1 over the
+              long-anomaly datasets weighted by TUNE_REWARD_WEIGHT_F1,
+              against coverage fraction (the fraction of the total
+              timeline SAR flags) over the point-wise datasets weighted by
+              TUNE_REWARD_WEIGHT_COVERAGE.
+
+                  python main.py --mode tune-combined
 
 All manually-tunable SAR parameters (T, W, LAMBDA, G_MAX, D_MIN) and the
 evaluation-pipeline settings are read from main_config.py; they can be
@@ -81,15 +112,28 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run Sustained Anomaly Recognition (SAR) on a time series CSV.")
     parser.add_argument(
         "--mode",
-        choices=["single", "single-wide", "cesnet", "evaluate", "tune"],
+        choices=[
+            "single",
+            "single-wide",
+            "cesnet",
+            "evaluate",
+            "evaluate-point-wise",
+            "tune",
+            "tune-point-wise",
+            "tune-combined",
+        ],
         default=cfg.EVAL_MODE,
         help=f"'single' runs SAR on --input; 'single-wide' is the same but for a full "
         f"double-column-width example figure (default input: WIDE_INPUT); 'cesnet' "
         f"runs SAR on all three CESNET_INPUTS metrics and counts anomalous sections in "
         f"each (no ground truth), plus the single-wide n_packets plot; 'evaluate' "
-        f"runs it over a whole labelled dataset; 'tune' searches "
-        f"SMOOTHING_WINDOW/LAMBDA/G_MAX/D_MIN for the best mean F1 score on that "
-        f"dataset (default: {cfg.EVAL_MODE}).",
+        f"runs it over a whole labelled dataset; 'evaluate-point-wise' runs it over "
+        f"POINTWISE_DATASETS (NAB/Yahoo/IOPS), scores each the same way 'evaluate' "
+        f"does, and also counts signalled regions and their duration per series and "
+        f"per dataset; 'tune'/'tune-point-wise'/'tune-combined' (tuning.py) search "
+        f"SMOOTHING_WINDOW/LAMBDA/G_MAX/D_MIN for the best mean F1 over the long-anomaly "
+        f"datasets / mean F1 over POINTWISE_DATASETS / a combined F1-vs-coverage reward "
+        f"over both, respectively (default: {cfg.EVAL_MODE}).",
     )
     parser.add_argument(
         "--input",
@@ -142,7 +186,7 @@ def make_output_path(output_dir, dt_str, what, run_tag, ext):
 
 def find_eval_files(args):
     """Files matching --eval-file-glob in --eval-dataset-dir, minus any
-    named in main_config.EVAL_EXCLUDE_FILES. Used by --mode evaluate/tune.
+    named in main_config.EVAL_EXCLUDE_FILES. Used by --mode evaluate.
     """
     files = sorted(glob.glob(os.path.join(args.eval_dataset_dir, args.eval_file_glob)))
     files = [f for f in files if os.path.basename(f) not in cfg.EVAL_EXCLUDE_FILES]
@@ -151,25 +195,32 @@ def find_eval_files(args):
     return files
 
 
-def resolve_sar_params(args, wide=False):
-    """Manual SAR parameters, with CLI overrides applied on top of
-    main_config - the WIDE_* settings when wide=True (--mode single-wide),
-    otherwise the plain ones.
+def resolve_sar_params(args):
+    """Manual SAR parameters (SMOOTHING_WINDOW, LAMBDA, G_MAX, D_MIN), with
+    CLI overrides applied on top of main_config. Every mode except tune/
+    tune-point-wise/tune-combined (which search over these instead of
+    using a fixed set) and evaluate-point-wise (which uses its own
+    per-dataset parameters - see resolve_pointwise_sar_params()) shares
+    this one parameter set - --mode single-wide and --mode cesnet used to
+    have their own separate WIDE_* SAR parameters, but no longer do.
     """
-    if wide:
-        defaults = {
-            "smoothing_window": cfg.WIDE_SMOOTHING_WINDOW,
-            "lam": cfg.WIDE_LAMBDA,
-            "g_max": cfg.WIDE_G_MAX,
-            "d_min": cfg.WIDE_D_MIN,
-        }
-    else:
-        defaults = {
-            "smoothing_window": cfg.SMOOTHING_WINDOW,
-            "lam": cfg.LAMBDA,
-            "g_max": cfg.G_MAX,
-            "d_min": cfg.D_MIN,
-        }
+    return {
+        "period_seconds": cfg.PERIOD_SECONDS if args.period_seconds is None else args.period_seconds,
+        "smoothing_window": cfg.SMOOTHING_WINDOW if args.smoothing_window is None else args.smoothing_window,
+        "lam": cfg.LAMBDA if args.lam is None else args.lam,
+        "g_max": cfg.G_MAX if args.g_max is None else args.g_max,
+        "d_min": cfg.D_MIN if args.d_min is None else args.d_min,
+    }
+
+
+def resolve_pointwise_sar_params(args, dataset_name):
+    """Manual SAR parameters for one main_config.POINTWISE_DATASETS entry,
+    from its own main_config.POINTWISE_SAR_PARAMS dict, with CLI overrides
+    applied on top (same convention as resolve_sar_params() - a CLI
+    override replaces that parameter for every dataset uniformly). Used by
+    --mode evaluate-point-wise only.
+    """
+    defaults = cfg.POINTWISE_SAR_PARAMS[dataset_name]
     return {
         "period_seconds": cfg.PERIOD_SECONDS if args.period_seconds is None else args.period_seconds,
         "smoothing_window": defaults["smoothing_window"] if args.smoothing_window is None else args.smoothing_window,
@@ -196,7 +247,7 @@ def run_single(args):
 
     wide = args.mode == "single-wide"
     input_path = args.input or (cfg.WIDE_INPUT if wide else cfg.INPUT)
-    params = resolve_sar_params(args, wide)
+    params = resolve_sar_params(args)
 
     if wide:
         # plotter.py and the ground-truth/C-WDE loading below read these
@@ -314,7 +365,7 @@ def run_cesnet(args):
     """
     import plotter
 
-    params = resolve_sar_params(args, wide=True)
+    params = resolve_sar_params(args)
     cfg.VALUE_LABEL = cfg.WIDE_VALUE_LABEL
 
     out_dir = os.path.join(args.output_dir, cfg.CESNET_DATASET_NAME)
@@ -435,65 +486,222 @@ def run_evaluate(args):
         plotter.show_all()
 
 
-def run_tune(args):
-    import optuna
+def find_pointwise_files(dataset_dir, file_glob):
+    """Files matching file_glob in dataset_dir. Used by --mode evaluate-point-wise."""
+    files = sorted(glob.glob(os.path.join(dataset_dir, file_glob)))
+    if not files:
+        raise FileNotFoundError(f"No files matching '{file_glob}' found in {dataset_dir}")
+    return files
+
+
+def format_latex_metrics_table(mean_metrics_by_dataset, caption, label):
+    """A booktabs-style LaTeX table, one row per dataset (in the given
+    dict's order) with Precision/Recall/F1 score columns - same style as
+    the project's existing results tables (\\toprule/\\midrule/\\bottomrule,
+    \\textit row labels, \\textbf headers). Used by --mode evaluate-point-wise.
+
+    mean_metrics_by_dataset: {dataset_name: {"precision", "recall",
+    "f_score"}}, e.g. one row of evaluation.compute_mean_metrics()'s
+    output per dataset.
+    """
+    lines = [
+        r"\begin{table}[!htbp]",
+        r"\centering",
+        rf"\caption{{{caption}}}",
+        rf"\label{{{label}}}",
+        r"\begin{tabular}{lccc}",
+        r"\toprule",
+        r"\textbf{Dataset} & \textbf{Precision} & \textbf{Recall} & \textbf{F1 score} \\",
+        r"\midrule",
+    ]
+    for name, row in mean_metrics_by_dataset.items():
+        lines.append(rf"\textit{{{name}}} & {row['precision']:.4f} & {row['recall']:.4f} & {row['f_score']:.4f} \\")
+    lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+    return "\n".join(lines)
+
+
+def run_evaluate_pointwise(args):
+    """Run SAR over every series in each of main_config.POINTWISE_DATASETS
+    (NAB, Yahoo, IOPS) - each with its own main_config.POINTWISE_SAR_PARAMS
+    entry rather than the shared SMOOTHING_WINDOW/LAMBDA/G_MAX/D_MIN every
+    other mode uses (see resolve_pointwise_sar_params()) - saving
+    anomaly-region candidates the same way --mode evaluate does for NEK,
+    and also scoring them the same way
+    (evaluation.py, PRTS range-based metrics - it handles a single-timestep
+    ground-truth anomaly fine, verified separately) into their own
+    results/<dataset>/ folder. On top of that (these datasets label
+    individual anomalous points rather than sustained ranges, so a
+    range-based score alone doesn't say much about them) this also counts
+    how many regions SAR signalled, per series and as the total/mean/std
+    per dataset, plus the mean/std of the regions' own duration per
+    dataset. Finally prints a LaTeX table of mean precision/recall/F1
+    score, one row per dataset (format_latex_metrics_table()).
+
+    Yahoo and IOPS get faux timestamps (sar.load_time_series_faux_timestamps(),
+    at each dataset's "sampling_seconds") instead of their own sequential
+    row-index "timestamp" column - see the comment on POINTWISE_DATASETS.
+    """
+    import sys
+    import status_bar
     import evaluation
+    import plotter
 
-    files = find_eval_files(args)
+    # status_bar draws with a Unicode block character; some Windows consoles
+    # default to a codepage that can't encode it.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    period_seconds = cfg.PERIOD_SECONDS if args.period_seconds is None else args.period_seconds
+    rows = []
+    duration_rows = []
+    mean_metrics_by_dataset = {}
+    for dataset_name, dataset_cfg in cfg.POINTWISE_DATASETS.items():
+        params = resolve_pointwise_sar_params(args, dataset_name)
+        files = find_pointwise_files(dataset_cfg["dataset_dir"], dataset_cfg["file_glob"])
+        out_dir = os.path.join(args.output_dir, dataset_name)
+        range_dir = os.path.join(out_dir, "range_candidates")
+        os.makedirs(range_dir, exist_ok=True)
 
-    # Preload every series once; only the tuned parameters change across
-    # trials, and nothing is written to disk during tuning.
-    series = []
-    for file_path in files:
-        t, x = sar.load_time_series(file_path, args.time_column, args.value_column)
-        true_labels = pd.read_csv(file_path)[args.eval_label_column].to_numpy()
-        series.append((t, x, true_labels))
+        sampling_seconds = dataset_cfg.get("sampling_seconds")
 
-    sw_low, sw_high = cfg.TUNE_SMOOTHING_WINDOW_RANGE
-    lam_low, lam_high = cfg.TUNE_LAMBDA_RANGE
-    gmax_low, gmax_high = cfg.TUNE_G_MAX_RANGE
-    dmin_low, dmin_high = cfg.TUNE_D_MIN_RANGE
+        n = len(files)
+        for i, file_path in enumerate(files):
+            name = os.path.basename(file_path)
+            status_bar.draw_status_bar(i, n, text=f"[{dataset_name}] running SAR on {name}")
 
-    def objective(trial):
-        smoothing_window = trial.suggest_int("smoothing_window", sw_low, sw_high)
-        lam = trial.suggest_float("lam", lam_low, lam_high)
-        g_max = trial.suggest_int("g_max", gmax_low, gmax_high)
-        d_min = trial.suggest_int("d_min", dmin_low, dmin_high)
+            if sampling_seconds is not None:
+                t, x = sar.load_time_series_faux_timestamps(file_path, args.value_column, sampling_seconds)
+            else:
+                t, x = sar.load_time_series(file_path, args.time_column, args.value_column)
+            result = sar.run_sar(t, x, **params)
+            # Same convention as --mode evaluate's range_candidates:
+            # original file name, no date/parameter tag.
+            result.final_runs_df.to_csv(os.path.join(range_dir, name), index=False)
+            rows.append({"dataset": dataset_name, "series": name, "n_signalled_regions": len(result.final_runs)})
+            # One row per individual signalled region, for the per-dataset
+            # duration mean/std below (pooled over every region, not
+            # per-series first, since a series contributes a variable
+            # number of them).
+            duration_rows += [
+                {"dataset": dataset_name, "duration_timesteps": d}
+                for d in result.final_runs_df["duration_timesteps"]
+            ]
+        status_bar.draw_status_bar(n, n, text="done")
+        print()
+        print(f"Saved {n} range-candidate file(s) to {range_dir}")
 
-        f_scores = []
-        for t, x, true_labels in series:
-            result = sar.run_sar(
-                t,
-                x,
-                period_seconds=period_seconds,
-                smoothing_window=smoothing_window,
-                lam=lam,
-                g_max=g_max,
-                d_min=d_min,
-            )
-            _, _, fscore = evaluation.evaluate_series(true_labels, result.final_runs_df)
-            f_scores.append(fscore)
-        return float(sum(f_scores) / len(f_scores))
+        # PRTS precision/recall/F1, exactly as --mode evaluate computes them
+        # for NEK, saved/plotted into this dataset's own results/ folder.
+        metrics_df = evaluation.evaluate_dataset(dataset_cfg["dataset_dir"], range_dir, args.eval_label_column)
+        mean_metrics_df = evaluation.compute_mean_metrics(metrics_df)
+        mean_metrics_by_dataset[dataset_name] = mean_metrics_df.iloc[0].to_dict()
 
-    print(f"Tuning on {len(series)} series from {args.eval_dataset_dir}, {cfg.TUNE_N_TRIALS} trials...")
-    study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=cfg.TUNE_N_TRIALS)
+        if not cfg.SHOW_PLOT:
+            metrics_path = os.path.join(out_dir, "anomaly_det_metrics.csv")
+            metrics_df.to_csv(metrics_path, index=False)
+            print(f"Wrote metrics to {metrics_path}")
+
+            mean_metrics_path = os.path.join(out_dir, "anomaly_det_metrics_mean.csv")
+            mean_metrics_df.to_csv(mean_metrics_path, index=False)
+            print(f"Wrote mean metrics to {mean_metrics_path}")
+        else:
+            print("SHOW_PLOT is True: metrics are only displayed, not written to disk.")
+
+        print(metrics_df.to_string(index=False))
+        print(mean_metrics_df.to_string(index=False))
+
+        # The per-series breakdown is a 'view'-only diagnostic; 'paper' mode
+        # only produces the paper-ready mean-metrics summary.
+        if cfg.TARGET == "view":
+            per_series_path = None if cfg.SHOW_PLOT else os.path.join(out_dir, "anomaly_det_metrics_per_series.pdf")
+            plotter.plot_metrics_per_series(metrics_df, per_series_path)
+
+        mean_plot_path = None if cfg.SHOW_PLOT else os.path.join(out_dir, "anomaly_det_metrics_mean.pdf")
+        plotter.plot_mean_metrics(mean_metrics_df, mean_plot_path)
+
+    counts_df = pd.DataFrame(rows, columns=["dataset", "series", "n_signalled_regions"])
+    print()
+    print(counts_df.to_string(index=False))
+
+    if not cfg.SHOW_PLOT:
+        counts_path = os.path.join(args.output_dir, "pointwise_signalled_regions.csv")
+        counts_df.to_csv(counts_path, index=False)
+        print(f"\nWrote per-series signalled-region counts to {counts_path}")
+    else:
+        print("\nSHOW_PLOT is True: counts are only displayed, not written to disk.")
+
+    # Total/mean/std of signalled-region counts per dataset, keeping
+    # POINTWISE_DATASETS' order rather than groupby's alphabetical one.
+    # ddof=0 (population std) since this describes the dataset's own
+    # series/regions, not a sample of some larger population.
+    def population_std(s):
+        return s.std(ddof=0)
+
+    stats_df = (
+        counts_df.groupby("dataset")["n_signalled_regions"]
+        .agg(total="sum", mean="mean", std=population_std)
+        .reindex(cfg.POINTWISE_DATASETS.keys())
+        .reset_index()
+    )
+
+    # Mean/std of individual regions' duration per dataset, pooled across
+    # every series (not averaged per series first). fillna(0.0): a dataset
+    # with 0 or 1 signalled regions overall has an undefined/NaN std.
+    durations_df = pd.DataFrame(duration_rows, columns=["dataset", "duration_timesteps"])
+    duration_stats = (
+        durations_df.groupby("dataset")["duration_timesteps"]
+        .agg(mean_duration="mean", std_duration=population_std)
+        .reindex(cfg.POINTWISE_DATASETS.keys())
+        .fillna(0.0)
+        .reset_index()
+    )
+    stats_df = stats_df.merge(duration_stats, on="dataset")
 
     print()
-    print(f"Best mean F1 score: {study.best_value:.4f}")
-    print("Best parameters:")
-    for name, value in study.best_params.items():
-        print(f"  {name} = {value}")
+    for _, row in stats_df.iterrows():
+        print(
+            f"{row['dataset']}: {row['total']:.0f} signalled regions total "
+            f"(mean {row['mean']:.2f}, std {row['std']:.2f} per series; "
+            f"region duration mean {row['mean_duration']:.2f}, std {row['std_duration']:.2f} timesteps)"
+        )
+
+    if not cfg.SHOW_PLOT:
+        # Named after the three datasets and its content, not just "totals",
+        # since it now holds sum/mean/std rather than a single number.
+        stats_name = "_".join(cfg.POINTWISE_DATASETS.keys()) + "_signalled_region_stats.csv"
+        stats_path = os.path.join(args.output_dir, stats_name)
+        stats_df.to_csv(stats_path, index=False)
+        print(f"\nWrote per-dataset signalled-region stats to {stats_path}")
+
+    print()
+    print(
+        format_latex_metrics_table(
+            mean_metrics_by_dataset,
+            caption="Mean PRTS precision, recall, and F1 score on the point-wise labelled datasets.",
+            label="tab:pointwise_results",
+        )
+    )
+
+    if cfg.SHOW_PLOT:
+        plotter.show_all()
 
 
 def main():
     args = parse_args()
     if args.mode == "evaluate":
         run_evaluate(args)
+    elif args.mode == "evaluate-point-wise":
+        run_evaluate_pointwise(args)
     elif args.mode == "tune":
-        run_tune(args)
+        import tuning
+
+        tuning.run_tune(args)
+    elif args.mode == "tune-point-wise":
+        import tuning
+
+        tuning.run_tune_pointwise(args)
+    elif args.mode == "tune-combined":
+        import tuning
+
+        tuning.run_tune_combined(args)
     elif args.mode == "cesnet":
         run_cesnet(args)
     else:
